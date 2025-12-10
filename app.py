@@ -3,20 +3,18 @@ import google.generativeai as genai
 import faiss
 import pickle
 import numpy as np
+import json
 import toml
 import os
+from pytubefix import YouTube
+import xml.etree.ElementTree as ET
 
-# --- CONFIGURAÇÕES E CONSTANTES ---
-NOME_DO_PROJETO = "Miudinho.AI v2.0 (Rerank + Expansion)"
-MODELO_EMBEDDING = 'models/text-embedding-004'
-MODELO_GERACAO = 'gemini-2.5-flash'  # Modelo rápido e barato para Rerank e Resposta
-
-# Caminhos (ajustados conforme sua estrutura de pastas na imagem)
-CAMINHO_INDEX = 'banco_vetorial_gemini_srt_900.index'
-CAMINHO_PKL = 'chunks_mapeamento_gemini_srt_900.pkl'
-
-# Configuração da Página
-st.set_page_config(page_title=NOME_DO_PROJETO, layout="wide")
+# --- CONFIGURAÇÃO INICIAL DA PÁGINA ---
+st.set_page_config(
+    page_title="MiudinhoAI v2.0",
+    page_icon="🤖",
+    layout="wide"
+)
 
 # --- 1. CONFIGURAÇÃO DE SEGURANÇA (API KEY) ---
 GEMINI_API_KEY = None
@@ -28,231 +26,307 @@ try:
 except Exception:
     pass
 
-# Se não achou, tenta ler localmente (.streamlit/secrets.toml) ou .env
+# Se não achou, tenta ler localmente (ajuste o caminho se necessário)
 if not GEMINI_API_KEY:
-    # Tenta caminho relativo padrão do streamlit
-    secrets_path = os.path.join(".streamlit", "secrets.toml")
-    if os.path.exists(secrets_path):
-        try:
-            with open(secrets_path, "r") as f:
+    # Caminho local de backup (apenas para seu uso no VSCode)
+    CAMINHO_SECRETS_LOCAL = r"C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\.streamlit\secrets.toml"
+    try:
+        if os.path.exists(CAMINHO_SECRETS_LOCAL):
+            with open(CAMINHO_SECRETS_LOCAL, "r") as f:
                 config = toml.load(f)
                 GEMINI_API_KEY = config.get("GEMINI_API_KEY")
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 if not GEMINI_API_KEY:
-    st.error("❌ ERRO: Chave de API não encontrada. Configure o arquivo .streamlit/secrets.toml")
+    st.error("❌ ERRO: Chave de API não encontrada.")
+    st.info("Configure o arquivo .streamlit/secrets.toml para execução local ou adicione aos Secrets do Streamlit Cloud.")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- 2. FUNÇÕES DE CARREGAMENTO (CACHED) ---
+# --- MODELOS E CONSTANTES ---
+# Usando o Flash para ser rápido na busca e rerank
+MODELO_RERANK = 'gemini-2.5-flash' 
+# Usando o Pro ou Flash para a resposta final (Flash é mais rápido, Pro é mais detalhado)
+MODELO_RESPOSTA = 'gemini-2.5-flash' 
+MODELO_EMBEDDING = 'models/text-embedding-004'
+
+# Caminhos (Usando caminhos relativos para funcionar no Github/Cloud)
+# Certifique-se que os arquivos estão na raiz ou na pasta correta no Git
+# Se estiver rodando local e der erro, volte para o caminho absoluto.
+FAISS_INDEX_FILE = 'banco_vetorial_gemini_srt_900.index'
+CHUNKS_MAPPING_FILE = 'chunks_mapeamento_gemini_srt_900.pkl'
+VIDEO_JSON_FILE = 'videos_miudinho_uberaba.json'
+
+# --- FUNÇÕES DE CARREGAMENTO (CACHE) ---
+
 @st.cache_resource
-def carregar_dados():
-    """Carrega o índice FAISS e os metadados PKL apenas uma vez."""
-    if not os.path.exists(CAMINHO_INDEX) or not os.path.exists(CAMINHO_PKL):
-        return None, None
-    
-    index = faiss.read_index(CAMINHO_INDEX)
-    with open(CAMINHO_PKL, 'rb') as f:
-        chunks = pickle.load(f)
-    return index, chunks
-
-# --- 3. FUNÇÕES DE INTELIGÊNCIA (EXPANSION & RERANK) ---
-
-def expandir_consulta(pergunta_usuario):
-    """Gera variações da pergunta para aumentar a chance de encontrar trechos."""
-    prompt = f"""
-    Você é um especialista em buscas semânticas para conteúdo bíblico.
-    O usuário fez a pergunta: "{pergunta_usuario}"
-    
-    Gere 3 variações curtas dessa pergunta para buscar em um banco de dados vetorial.
-    Pense em sinônimos teológicos ou formas diferentes de frasear.
-    
-    Retorne APENAS as perguntas separadas por quebra de linha. Nada mais.
-    """
+def load_faiss_index():
+    """Carrega o índice FAISS e os metadados."""
     try:
-        model = genai.GenerativeModel(MODELO_GERACAO)
-        response = model.generate_content(prompt)
-        # Limpa e separa as linhas
-        variacoes = [line.strip() for line in response.text.split('\n') if line.strip()]
-        # Adiciona a pergunta original na lista
-        return [pergunta_usuario] + variacoes[:3] 
+        # Tenta carregar. Se não achar, tenta caminho absoluto (fallback local)
+        if not os.path.exists(FAISS_INDEX_FILE):
+             # Fallback para seu caminho local absoluto se o relativo falhar
+             caminho_abs_index = r'C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\banco_vetorial_gemini_srt_900.index'
+             caminho_abs_pkl = r'C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\chunks_mapeamento_gemini_srt_900.pkl'
+             if os.path.exists(caminho_abs_index):
+                 index = faiss.read_index(caminho_abs_index)
+                 with open(caminho_abs_pkl, 'rb') as f:
+                     metadata = pickle.load(f)
+                 return index, metadata
+        
+        # Carregamento padrão (Cloud/Git)
+        index = faiss.read_index(FAISS_INDEX_FILE)
+        with open(CHUNKS_MAPPING_FILE, 'rb') as f:
+            metadata = pickle.load(f)
+        return index, metadata
+        
     except Exception as e:
-        print(f"Erro na expansão: {e}")
-        return [pergunta_usuario]
+        st.error(f"Erro ao carregar banco de dados: {e}")
+        return None, None
 
-def rerank_chunks(pergunta, candidatos, top_n=5):
-    """
-    Recebe uma lista grande de candidatos (chunks) e usa o Gemini para
-    escolher os melhores e ordená-los por relevância real.
-    """
-    # Monta um texto numerado com os candidatos
-    textos_candidatos = ""
-    for i, chunk in enumerate(candidatos):
-        # Limitamos o tamanho do texto para não estourar tokens desnecessariamente
-        trecho_curto = chunk['text'][:600].replace('\n', ' ')
-        textos_candidatos += f"ID_{i}: {trecho_curto}\n\n"
+@st.cache_data
+def load_video_data():
+    """Carrega o JSON dos vídeos."""
+    try:
+        if os.path.exists(VIDEO_JSON_FILE):
+            with open(VIDEO_JSON_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+             # Fallback local
+             caminho_abs_json = r'C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\videos_miudinho_uberaba.json'
+             if os.path.exists(caminho_abs_json):
+                with open(caminho_abs_json, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        return []
+    except Exception:
+        return []
 
-    prompt_rerank = f"""
-    Analise a relevância dos trechos abaixo para responder à pergunta: "{pergunta}"
+# --- LÓGICA DE INTELIGÊNCIA (RAG + VIDEO) ---
+
+def expand_query(user_query):
+    """Gera variações da pergunta."""
+    try:
+        model = genai.GenerativeModel(MODELO_RERANK)
+        prompt = f"""
+        Gere 3 formas diferentes de perguntar: "{user_query}"
+        Foque em sinônimos teológicos e palavras-chave relacionadas a estudos bíblicos.
+        Retorne apenas as perguntas, uma por linha.
+        """
+        response = model.generate_content(prompt)
+        variations = [line.strip() for line in response.text.split('\n') if line.strip()]
+        return [user_query] + variations
+    except:
+        return [user_query]
+
+def rerank_chunks(query, chunks, top_n=7):
+    """
+    Reordena os chunks para garantir relevância, mas mantém um número saudável (top_n=7)
+    para não encurtar demais a resposta final.
+    """
+    if not chunks:
+        return []
+        
+    # Monta texto para o Gemini avaliar
+    candidatos_txt = ""
+    for i, c in enumerate(chunks):
+        candidatos_txt += f"ID_{i}: {c['text'][:400]}...\n\n" # Envia só o começo para economizar
+
+    prompt = f"""
+    Analise a pergunta: "{query}"
+    Classifique os trechos abaixo por relevância para responder essa pergunta.
     
-    TRECHOS CANDIDATOS:
-    {textos_candidatos}
+    TRECHOS:
+    {candidatos_txt}
     
-    TAREFA:
-    Identifique quais desses trechos são REALMENTE úteis para responder à pergunta.
-    Classifique os melhores (no máximo {top_n}).
-    
-    Retorne APENAS os IDs dos trechos escolhidos, em ordem de relevância (do melhor para o pior), separados por vírgula.
-    Exemplo de saída: ID_3, ID_0, ID_12
+    Retorne APENAS os IDs dos {top_n} melhores, ordenados do mais relevante para o menos, separados por vírgula.
+    Exemplo: ID_2, ID_0, ID_5
     """
     
     try:
-        model = genai.GenerativeModel(MODELO_GERACAO)
-        response = model.generate_content(prompt_rerank)
-        resposta_texto = response.text.strip()
-        
-        # Processa a resposta para pegar os índices
-        indices_escolhidos = []
-        partes = resposta_texto.replace("ID_", "").split(",")
-        
-        for p in partes:
+        model = genai.GenerativeModel(MODELO_RERANK)
+        response = model.generate_content(prompt)
+        ids_str = response.text.replace("ID_", "").split(",")
+        indices = []
+        for x in ids_str:
             try:
-                idx = int(p.strip())
-                if 0 <= idx < len(candidatos):
-                    indices_escolhidos.append(idx)
-            except ValueError:
+                idx = int(x.strip())
+                if 0 <= idx < len(chunks):
+                    indices.append(idx)
+            except:
                 continue
         
-        # Reconstrói a lista de objetos baseada nos índices escolhidos
-        chunks_reranked = [candidatos[i] for i in indices_escolhidos]
+        results = [chunks[i] for i in indices]
+        # Se o rerank falhar ou retornar vazio, devolve os originais (fallback)
+        return results if results else chunks[:top_n]
+    except:
+        return chunks[:top_n]
+
+def get_video_transcript(url):
+    """Pega a legenda do YouTube via Pytubefix."""
+    try:
+        yt = YouTube(url)
+        # Tenta várias tags de idioma pt
+        caption = None
+        for lang in ['pt', 'pt-BR', 'a.pt']:
+            if lang in yt.captions:
+                caption = yt.captions[lang]
+                break
         
-        # Se o modelo falhar em retornar IDs válidos, devolve os originais cortados
-        if not chunks_reranked:
-            return candidatos[:top_n]
+        if not caption:
+            return None
             
-        return chunks_reranked
-        
+        xml_captions = caption.xml_captions
+        root = ET.fromstring(xml_captions)
+        lines = [elem.text for elem in root.iter('text') if elem.text]
+        return " ".join(lines)
     except Exception as e:
-        print(f"Erro no Reranking: {e}")
-        return candidatos[:top_n] # Fallback: retorna os primeiros do FAISS
+        st.error(f"Erro ao obter legenda: {e}")
+        return None
 
-# --- 4. FUNÇÃO DE BUSCA PRINCIPAL ---
-def buscar_resposta(query_usuario, index, chunks_data):
-    
-    # 1. Expansão da Consulta
-    with st.status("🧠 Analisando sua pergunta...", expanded=False) as status:
-        status.write("Gerando variações para busca ampla...")
-        queries_expandidas = expandir_consulta(query_usuario)
-        status.write(f"Variações geradas: {queries_expandidas}")
-        
-        # 2. Busca Vetorial (FAISS) para cada variação
-        status.write("Consultando banco de dados...")
-        todos_indices = []
-        
-        model_emb = 'models/text-embedding-004'
-        for q in queries_expandidas:
-            vetor_pergunta = genai.embed_content(
-                model=model_emb,
-                content=q,
-                task_type="RETRIEVAL_QUERY"
-            )["embedding"]
-            
-            # Busca Top 15 para cada variação (queremos volume para filtrar depois)
-            D, I = index.search(np.array([vetor_pergunta]), k=15)
-            todos_indices.extend(I[0])
-        
-        # 3. Deduplicação (remove repetidos)
-        indices_unicos = list(set(todos_indices))
-        candidatos_iniciais = [chunks_data[i] for i in indices_unicos if i < len(chunks_data)]
-        
-        status.write(f"Encontrados {len(candidatos_iniciais)} trechos potenciais. Refinando...")
+# --- INTERFACE PRINCIPAL ---
 
-        # 4. Reranking (O Pulo do Gato 🐈)
-        # Seleciona apenas os Top 5 melhores dentre os candidatos
-        chunks_finais = rerank_chunks(query_usuario, candidatos_iniciais, top_n=5)
-        
-        status.update(label="✅ Busca e Análise concluídas!", state="complete", expanded=False)
-    
-    return chunks_finais
-
-# --- 5. INTERFACE DO USUÁRIO ---
 def main():
-    st.title("🎥 " + NOME_DO_PROJETO)
-    st.markdown("Busque por assuntos na base de vídeos e vá direto ao momento da fala.")
+    st.title("🤖 MiudinhoAI - Central de Conhecimento")
     
-    index, chunks_data = carregar_dados()
+    tab1, tab2 = st.tabs(["🔍 Busca Global (Acervo)", "🎬 Análise de Vídeo Individual"])
     
-    if index is None:
-        st.error("⚠️ Banco de dados não encontrado! Rode o script 'criar_banco_vetores_srt.py' primeiro.")
-        return
-
-    query = st.text_input("O que você procura?", placeholder="Ex: O que foi falado sobre o filho pródigo?")
-    
-    if st.button("Pesquisar", type="primary"):
-        if not query:
-            st.warning("Digite algo para pesquisar.")
-            return
-
-        # Executa a busca inteligente
-        chunks_relevantes = buscar_resposta(query, index, chunks_data)
+    # --- ABA 1: BUSCA GLOBAL ---
+    with tab1:
+        st.header("Pesquise em todo o canal")
+        st.caption("O sistema busca o momento exato da fala nos vídeos.")
         
-        if not chunks_relevantes:
-            st.warning("Nada encontrado. Tente reformular a pergunta.")
-            return
-
-        # Geração da Resposta Final com Gemini
-        with st.spinner("Gerando resposta explicativa..."):
-            contexto = ""
-            for doc in chunks_relevantes:
-                # Inclui metadados no contexto para o LLM saber a fonte
-                info_fonte = f"[Vídeo: {doc.get('source_file', 'desc')}]"
-                contexto += f"{info_fonte}\nConteúdo: {doc['text']}\n\n"
-            
-            prompt_final = f"""
-            Você é um assistente útil e preciso. Use os trechos abaixo transcritos de vídeos para responder à pergunta do usuário.
-            
-            Pergunta: {query}
-            
-            Trechos encontrados:
-            {contexto}
-            
-            Instruções:
-            1. Responda de forma direta e explicativa.
-            2. Se os trechos não responderem à pergunta, diga que não encontrou a informação.
-            3. Cite o contexto se necessário.
-            """
-            
-            model = genai.GenerativeModel(MODELO_GERACAO)
-            resposta = model.generate_content(prompt_final)
-            
-        st.markdown("### Resposta:")
-        st.write(resposta.text)
+        index, metadata = load_faiss_index()
+        query = st.text_input("Qual sua dúvida teológica ou curiosidade?", key="search_box")
         
-        st.divider()
-        st.subheader("📺 Fontes e Vídeos")
-        st.caption("Clique nos vídeos abaixo para assistir exatamente onde o assunto é abordado.")
+        if st.button("Pesquisar no Acervo", type="primary"):
+            if not index or not query:
+                st.warning("Banco de dados não carregado ou busca vazia.")
+            else:
+                status = st.status("🕵️ Processando sua busca...", expanded=True)
+                
+                # 1. Expansão
+                status.write("Expandindo termos da pesquisa...")
+                queries = expand_query(query)
+                
+                # 2. Busca Vetorial (Pega bastante coisa para filtrar depois)
+                status.write("Varrendo banco de dados...")
+                chunk_results = []
+                model_emb = genai.EmbedContentModel(model=MODELO_EMBEDDING)
+                
+                # Faz embedding de todas as variações
+                embeddings = model_emb.embed_content(content=queries, task_type="RETRIEVAL_QUERY")['embedding']
+                
+                # Busca no FAISS
+                D, I = index.search(np.array(embeddings), k=10) # 10 por variação
+                
+                # Deduplicação
+                seen_indices = set()
+                candidates = []
+                for row in I:
+                    for idx in row:
+                        if idx != -1 and idx not in seen_indices:
+                            seen_indices.add(idx)
+                            if idx < len(metadata):
+                                candidates.append(metadata[idx])
+                
+                # 3. Rerank (O Refinamento)
+                status.write(f"Analisando {len(candidates)} trechos encontrados...")
+                # Aumentei o top_n para 7 para garantir resposta longa
+                final_chunks = rerank_chunks(query, candidates, top_n=7) 
+                
+                status.update(label="✅ Busca concluída!", state="complete", expanded=False)
+                
+                # 4. Geração da Resposta
+                if final_chunks:
+                    st.subheader("📝 Resposta Sintetizada")
+                    
+                    contexto = ""
+                    for c in final_chunks:
+                        contexto += f"Fonte: {c['source_file']}\nTexto: {c['text']}\n\n"
+                    
+                    prompt_resposta = f"""
+                    Use os trechos abaixo para responder a pergunta: "{query}".
+                    
+                    TRECHOS:
+                    {contexto}
+                    
+                    Instruções:
+                    1. Seja DETALHADO e didático. Explique bem o conceito.
+                    2. Se houver divergência nos trechos, mencione.
+                    3. Cite o nome do arquivo fonte entre parênteses quando usar uma informação.
+                    """
+                    
+                    with st.spinner("Escrevendo resposta..."):
+                        model_resp = genai.GenerativeModel(MODELO_RESPOSTA)
+                        res = model_resp.generate_content(prompt_resposta)
+                        st.markdown(res.text)
+                    
+                    st.divider()
+                    st.subheader("📺 Fontes Encontradas (Clique para assistir)")
+                    
+                    # Layout: Vídeo na Esquerda, Texto na Direita
+                    for i, chunk in enumerate(final_chunks):
+                        with st.expander(f"Fonte {i+1}: {chunk['source_file']} (Ver trecho)", expanded=True):
+                            col_video, col_text = st.columns([1, 1.2]) # Ajuste de proporção
+                            
+                            with col_video:
+                                url = chunk.get('url')
+                                time = int(chunk.get('start_time', 0))
+                                if url:
+                                    st.video(url, start_time=time)
+                                    st.caption(f"Inicia em: {time}s")
+                                else:
+                                    st.image("https://via.placeholder.com/300x169?text=Sem+URL")
+                            
+                            with col_text:
+                                st.markdown("**Transcrição:**")
+                                st.info(chunk['text'])
+                else:
+                    st.warning("Nenhum conteúdo relevante encontrado.")
 
-        # Exibição dos Vídeos (Lógica de Timestamp mantida!)
-        for i, chunk in enumerate(chunks_relevantes):
-            with st.expander(f"Fonte {i+1}: ...{chunk['text'][:60]}...", expanded=True):
-                col1, col2 = st.columns([1, 1.5])
+    # --- ABA 2: ANÁLISE INDIVIDUAL ---
+    with tab2:
+        st.header("Analise um vídeo específico")
+        videos = load_video_data()
+        
+        if not videos:
+            st.warning("Arquivo 'videos_miudinho_uberaba.json' não encontrado.")
+        else:
+            titulos = [v['titulo'] for v in videos]
+            escolha = st.selectbox("Selecione o vídeo:", titulos)
+            
+            video_selecionado = next((v for v in videos if v['titulo'] == escolha), None)
+            
+            if video_selecionado:
+                st.video(video_selecionado['url'])
                 
-                url_video = chunk.get('url')
-                start_time = int(chunk.get('start_time', 0))
-                
-                with col1:
-                    if url_video:
-                        st.video(url_video, start_time=start_time)
-                        st.caption(f"Começa em: {start_time}s")
-                    else:
-                        st.image("https://via.placeholder.com/300x169?text=Sem+Video", caption="URL não mapeada")
-                
-                with col2:
-                    st.markdown(f"**Transcrição:**")
-                    st.info(chunk['text'])
-                    st.markdown(f"*Arquivo original: {chunk.get('source_file')}*")
+                if st.button("Gerar Resumo e Análise deste Vídeo"):
+                    with st.spinner("Baixando legendas e analisando..."):
+                        transcript = get_video_transcript(video_selecionado['url'])
+                        
+                        if transcript:
+                            prompt_analise = f"""
+                            Analise a seguinte transcrição de vídeo do canal 'Miudinho Uberaba'.
+                            Título: {video_selecionado['titulo']}
+                            Descrição/Versículo: {video_selecionado.get('descricao', '')}
+                            
+                            Transcrição:
+                            {transcript[:25000]}  # Limite de caracteres para segurança
+                            
+                            Gere:
+                            1. Um resumo dos principais pontos teológicos (bullets).
+                            2. Explicação de como o versículo chave foi abordado.
+                            3. Lista de livros ou autores citados (se houver).
+                            """
+                            model_analise = genai.GenerativeModel('gemini-1.5-flash')
+                            res_analise = model_analise.generate_content(prompt_analise)
+                            
+                            st.markdown("### 📊 Análise do Vídeo")
+                            st.markdown(res_analise.text)
+                        else:
+                            st.error("Não foi possível obter a legenda deste vídeo (pode não ter legenda em PT).")
 
 if __name__ == "__main__":
     main()
