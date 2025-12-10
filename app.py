@@ -120,9 +120,9 @@ def expand_query(user_query):
     except:
         return [user_query]
 
-def rerank_chunks(query, chunks, top_n=7):
+def rerank_chunks(query, chunks, top_n=10):
     """
-    Reordena os chunks para garantir relevância, mas mantém um número saudável (top_n=7)
+    Reordena os chunks para garantir relevância, mas mantém um número saudável (top_n=10)
     para não encurtar demais a resposta final.
     """
     if not chunks:
@@ -213,10 +213,14 @@ def main():
                 # 2. Busca Vetorial (Pega bastante coisa para filtrar depois)
                 status.write("Varrendo banco de dados...")
                 chunk_results = []
-                model_emb = genai.EmbedContentModel(model=MODELO_EMBEDDING)
                 
-                # Faz embedding de todas as variações
-                embeddings = model_emb.embed_content(content=queries, task_type="RETRIEVAL_QUERY")['embedding']
+                result = genai.embed_content(
+                    model=MODELO_EMBEDDING,
+                    content=queries,
+                    task_type="retrieval_query"
+                )
+
+                embeddings = result['embedding']
                 
                 # Busca no FAISS
                 D, I = index.search(np.array(embeddings), k=10) # 10 por variação
