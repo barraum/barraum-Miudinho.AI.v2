@@ -1,0 +1,4 @@
+criar_banco_vetores_srt.py
+*.index
+*.pkl
+app_local.py

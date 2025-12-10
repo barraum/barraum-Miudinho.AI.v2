@@ -1,0 +1,6 @@
+streamlit
+google-generativeai
+faiss-cpu
+numpy
+toml
+pysrt
