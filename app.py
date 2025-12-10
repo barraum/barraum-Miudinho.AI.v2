@@ -286,47 +286,81 @@ def main():
                 else:
                     st.warning("Nenhum conteúdo relevante encontrado.")
 
-    # --- ABA 2: ANÁLISE INDIVIDUAL ---
+    # --- ABA 2: ANÁLISE INDIVIDUAL (RESTAURADA ORIGINAL) ---
     with tab2:
         st.header("Analise um vídeo específico")
-        videos = load_video_data()
-        
-        if not videos:
-            st.warning("Arquivo 'videos_miudinho_uberaba.json' não encontrado.")
-        else:
-            titulos = [v['titulo'] for v in videos]
-            escolha = st.selectbox("Selecione o vídeo:", titulos)
+        st.info("Escolha um vídeo para resumo ou análise de expressões.")
+
+        video_data = load_video_data()
+
+        if video_data:
+            video_titles = [video['titulo'] for video in video_data]
+            selected_title = st.selectbox("Escolha o vídeo:", options=video_titles, key="video_selector")
             
-            video_selecionado = next((v for v in videos if v['titulo'] == escolha), None)
-            
-            if video_selecionado:
-                st.video(video_selecionado['url'])
+            selected_video = next((v for v in video_data if v['titulo'] == selected_title), None)
+
+            if selected_video:
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.video(selected_video['url'])
+                with col2:
+                    st.subheader(selected_video['titulo'])
+                    st.write(f"**Versículo:** *{selected_video.get('descricao', '')}*")
                 
-                if st.button("Gerar Resumo e Análise deste Vídeo"):
-                    with st.spinner("Baixando legendas e analisando..."):
-                        transcript = get_video_transcript(video_selecionado['url'])
+                st.divider()
+
+                # --- AQUI ESTÁ A LÓGICA RESTAURADA ---
+                action = st.radio(
+                    "O que você gostaria de fazer com este vídeo?",
+                    ("Análise de Expressões e Referências", "Resumo Inteligente do Vídeo"),
+                    key="action_choice",
+                    horizontal=True
+                )
+
+                if st.button("Analisar com Gemini", key="analyze_button", type="primary"):
+                    with st.spinner("Baixando legendas e processando... 📜"):
+                        transcript = get_video_transcript(selected_video['url'])
+
+                    if transcript:
+                        prompt_base = ""
                         
-                        if transcript:
-                            prompt_analise = f"""
-                            Analise a seguinte transcrição de vídeo do canal 'Miudinho Uberaba'.
-                            Título: {video_selecionado['titulo']}
-                            Descrição/Versículo: {video_selecionado.get('descricao', '')}
-                            
-                            Transcrição:
-                            {transcript[:25000]}  # Limite de caracteres para segurança
-                            
-                            Gere:
-                            1. Um resumo dos principais pontos teológicos (bullets).
-                            2. Explicação de como o versículo chave foi abordado.
-                            3. Lista de livros ou autores citados (se houver).
+                        # Lógica condicional de prompts restaurada
+                        if action == "Análise de Expressões e Referências":
+                            prompt_base = f"""
+                            Você é um assistente acadêmico de estudos bíblicos.
+                            Analise a transcrição e o versículo.
+                            Extraia e liste APENAS:
+                            ### Palavras e Expressões em Análise
+                            (Foco do "estudo miudinho").
+                            ### Referências Bibliográficas
+                            (Livros e autores citados). Se não houver, diga "Nenhuma referência explícita".
                             """
-                            model_analise = genai.GenerativeModel('gemini-1.5-flash')
-                            res_analise = model_analise.generate_content(prompt_analise)
-                            
-                            st.markdown("### 📊 Análise do Vídeo")
-                            st.markdown(res_analise.text)
-                        else:
-                            st.error("Não foi possível obter a legenda deste vídeo (pode não ter legenda em PT).")
+                        
+                        elif action == "Resumo Inteligente do Vídeo":
+                            prompt_base = f"""
+                            Crie um resumo claro conectando a transcrição ao versículo.
+                            ### Resumo da Análise
+                            (2-3 parágrafos explicando o tema).
+                            ### Tópicos Principais
+                            (3-5 pontos centrais).
+                            """
+
+                        prompt_final = f"""
+                        {prompt_base}
+                        --- DADOS ---
+                        Versículo: {selected_video.get('descricao', '')}
+                        Transcrição: {transcript[:25000]}
+                        """
+                        
+                        try:
+                            model = genai.GenerativeModel(MODELO_RESPOSTA)
+                            response = model.generate_content(prompt_final)
+                            st.header("Resultado da Análise")
+                            st.markdown(response.text)
+                        except Exception as e:
+                            st.error(f"Erro na API Gemini: {e}")
+                    else:
+                        st.error("Não foi possível obter legendas em Português para este vídeo.")
 
 if __name__ == "__main__":
     main()
