@@ -68,8 +68,8 @@ def load_faiss_index():
         # Tenta carregar. Se não achar, tenta caminho absoluto (fallback local)
         if not os.path.exists(FAISS_INDEX_FILE):
              # Fallback para seu caminho local absoluto se o relativo falhar
-             caminho_abs_index = r'C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\banco_vetorial_gemini_srt_900.index'
-             caminho_abs_pkl = r'C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\chunks_mapeamento_gemini_srt_900.pkl'
+             caminho_abs_index = r'C:\Users\bruno\OneDrive\Projetos Python\25) MIUDINHO.AI.V2\banco_vetorial_gemini_srt_900.index'
+             caminho_abs_pkl = r'C:\Users\bruno\OneDrive\Projetos Python\25) MIUDINHO.AI.V2\chunks_mapeamento_gemini_srt_900.pkl'
              if os.path.exists(caminho_abs_index):
                  index = faiss.read_index(caminho_abs_index)
                  with open(caminho_abs_pkl, 'rb') as f:
@@ -95,7 +95,7 @@ def load_video_data():
                 return json.load(f)
         else:
              # Fallback local
-             caminho_abs_json = r'C:\Users\bruno\OneDrive\Projetos Python\14) MIUDINHO.AI\videos_miudinho_uberaba.json'
+             caminho_abs_json = r'C:\Users\bruno\OneDrive\Projetos Python\25) MIUDINHO.AI.V2\videos_miudinho_uberaba.json'
              if os.path.exists(caminho_abs_json):
                 with open(caminho_abs_json, 'r', encoding='utf-8') as f:
                     return json.load(f)
